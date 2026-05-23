@@ -14,7 +14,7 @@ WAKE_MODEL: str = "tiny"
 COMMAND_MODEL: str = "base"
 COMPUTE_TYPE: str = "int8"
 
-CLAUDE_MODEL: str = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL: str = "claude-haiku-4-5-20251001" # changed model from sonnet to haiku for lower response time, may change in future 
 MAX_HISTORY_TURNS: int = 20
 
 TTS_VOICE: str = "en-US-AvaNeural"
