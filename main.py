@@ -4,6 +4,9 @@ import sys
 from dotenv import load_dotenv
 
 from audio import AudioRecorder
+from apis import (get_location, get_weather, get_news,
+                  get_duckduckgo_answer, get_wikipedia_summary,
+                  get_calendar_events, get_spotify_client, spotify_control)
 from config import INPUT_DEVICE, CONVERSATION_TIMEOUT_S
 from llm import ConversationManager
 from transcriber import Transcriber
@@ -14,9 +17,98 @@ _RESET_PHRASES = {"forget everything", "reset conversation", "start over", "clea
 _EXIT_PHRASES  = {"goodbye", "bye", "see you", "that's all", "stop", "go to sleep"}
 _SLEEP_PHRASES = {
     "thanks a lot", "thank you so much", "thanks for that", "thanks for your help",
-    "cheers", "that's all i need", "that's perfect", "that's great", "brilliant thanks",
-    "perfect thanks", "great thanks", "thank you",
+    "sleep", "that's all i need", "that's perfect", "that's great", "brilliant thanks",
+    "perfect thanks", "great thanks", "thank you", "nope, that's it"
 }
+_WEATHER_PHRASES = {
+    "weather", "temperature", "raining", "rain", "sunny", "cloudy",
+    "forecast", "wind", "hot outside", "cold outside", "snowing",
+    "snow", "humid", "humidity", "storm", "feels like",
+}
+_NEWS_PHRASES = {
+    "news", "headlines", "what's happening", "current events",
+    "latest", "in the news", "tell me about", "any news",
+}
+_CALENDAR_PHRASES = {
+    "calendar", "schedule", "appointments", "meetings", "what do i have",
+    "am i free", "what's on my schedule", "any events", "upcoming events",
+    "what's today", "what's tomorrow",
+}
+_SPOTIFY_PHRASES = {
+    "what's playing", "current song", "now playing", "what song is",
+    "who sings this", "what music",
+    "pause music", "pause the music", "stop the music", "next song", "skip song",
+    "skip this", "previous song", "volume up", "turn it up", "louder",
+    "volume down", "turn it down", "quieter", "resume music", "resume the music",
+    "play some", "play a song", "shuffle music", "shuffle songs",
+    "add to playlist", "add to my playlist", "save to playlist",
+    "save this song", "add this song", "add this to my",
+}
+_SEARCH_PHRASES = {
+    "search for", "look up", "look it up", "quick answer", "find information",
+    "google that", "search that",
+}
+_WIKIPEDIA_PHRASES = {
+    "wikipedia", "wiki",
+}
+
+
+def _extract_news_topic(user_text: str) -> str | None:
+    lower = user_text.lower()
+    for marker in ("about ", "on ", "regarding ", "related to "):
+        idx = lower.find("news " + marker)
+        if idx != -1:
+            topic = user_text[idx + len("news ") + len(marker):].strip()
+            return topic[:30].strip() or None
+    return None
+
+
+def _extract_search_query(user_text: str) -> str:
+    lower = user_text.lower()
+    for marker in ("search for ", "look up ", "find information about ", "google ", "quick answer for "):
+        idx = lower.find(marker)
+        if idx != -1:
+            return user_text[idx + len(marker):].strip()
+    return user_text.strip()
+
+
+def _extract_wikipedia_topic(user_text: str) -> str:
+    lower = user_text.lower()
+    for marker in ("wikipedia ", "wiki ", "on wikipedia", "on wiki"):
+        idx = lower.find(marker)
+        if idx != -1:
+            return user_text[idx + len(marker):].strip().strip("?")
+    return user_text.strip("?").strip()
+
+
+def _parse_spotify_command(user_text: str) -> dict:
+    lower = user_text.lower()
+    if any(p in lower for p in ("pause", "stop the music", "stop music")):
+        return {"action": "pause"}
+    if any(p in lower for p in ("next", "skip")):
+        return {"action": "next"}
+    if any(p in lower for p in ("previous song", "go back", "last song")):
+        return {"action": "previous"}
+    if any(p in lower for p in ("louder", "volume up", "turn it up", "turn up")):
+        return {"action": "volume_up"}
+    if any(p in lower for p in ("quieter", "volume down", "turn it down", "turn down")):
+        return {"action": "volume_down"}
+    if "shuffle" in lower:
+        return {"action": "shuffle"}
+    if any(p in lower for p in ("what's playing", "current song", "now playing", "who sings", "what song", "what music")):
+        return {"action": "current"}
+    if any(p in lower for p in ("add to playlist", "add to my playlist", "save to playlist",
+                                 "save this song", "add this song", "add this to my")):
+        return {"action": "add_to_playlist"}
+    # Normalise punctuation so "Play, Eyesight" matches the same as "Play Eyesight"
+    normalised = lower.replace(",", " ").replace("  ", " ")
+    for marker in ("play some ", "play a song called ", "play ", "put on some ", "put on "):
+        idx = normalised.find(marker)
+        if idx != -1:
+            query = user_text[idx + len(marker):].strip().lstrip(", ")
+            if query:
+                return {"action": "play", "query": query}
+    return {"action": "resume"}
 
 
 def main() -> None:
@@ -26,6 +118,30 @@ def main() -> None:
     if not api_key:
         print("[Sam] Error: ANTHROPIC_API_KEY not set. Create a .env file with your key.")
         sys.exit(1)
+
+    currents_api_key = os.environ.get("CURRENTS_API_KEY")
+    if not currents_api_key:
+        print("[Sam] Warning: CURRENTS_API_KEY not set. News queries will not work.")
+
+    spotify_id = os.environ.get("SPOTIFY_CLIENT_ID")
+    spotify_secret = os.environ.get("SPOTIFY_CLIENT_SECRET")
+    spotify_redirect = os.environ.get("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+    sp = None
+    if spotify_id and spotify_secret:
+        print("[Sam] Connecting to Spotify (browser may open for first-time auth)...")
+        sp = get_spotify_client(spotify_id, spotify_secret, spotify_redirect)
+        print("[Sam] Spotify connected." if sp else "[Sam] Warning: Spotify connection failed.")
+    else:
+        print("[Sam] Warning: SPOTIFY_CLIENT_ID/SECRET not set. Spotify queries will not work.")
+
+    if not os.path.exists("credentials.json"):
+        print("[Sam] Warning: credentials.json not found. Google Calendar will not work.")
+
+    location = get_location()
+    if "error" in location:
+        print(f"[Sam] Warning: could not auto-detect location — {location['error']}")
+    else:
+        print(f"[Sam] Location detected: {location['city']}, {location['country']}")
 
     recorder = AudioRecorder(device=INPUT_DEVICE)
     detector = WakeWordDetector(recorder)
@@ -79,10 +195,123 @@ def main() -> None:
                     recorder.drain()
                     continue
 
-                # Send to Claude and stream response directly to TTS
-                print("[Sam] ", end="", flush=True)
-                response = speaker.speak_streaming(conversation.stream_tokens(user_text))
-                print(f"{response}\n")
+                lower_text = user_text.lower()
+
+                # Weather intent
+                if any(phrase in lower_text for phrase in _WEATHER_PHRASES):
+                    if "error" in location:
+                        augmented = f"[System: Location unavailable — {location['error']}] The user asked: {user_text}"
+                    else:
+                        weather = get_weather(location["lat"], location["lon"])
+                        if "error" in weather:
+                            augmented = f"[System: Weather lookup failed — {weather['error']}] The user asked: {user_text}"
+                        else:
+                            c = weather["current"]
+                            forecast_parts = "; ".join(
+                                f"{d['date']}: high={d['high_f']}°F, low={d['low_f']}°F, "
+                                f"precip={d['precipitation_in']}in, UV max={d['uv_index_max']}, "
+                                f"wind max={d['wind_speed_max_mph']}mph, code={d['weather_code']}"
+                                for d in weather["forecast"]
+                            )
+                            augmented = (
+                                f"[System: Current weather in {location['city']} — "
+                                f"temp={c['temperature_f']}°F, feels like={c['feels_like_f']}°F, "
+                                f"humidity={c['humidity_pct']}%, precipitation={c['precipitation_in']}in, "
+                                f"wind={c['wind_speed_mph']}mph, UV index={c['uv_index']}, "
+                                f"WMO code={c['weather_code']}, is_day={c['is_day']}. "
+                                f"4-day forecast: {forecast_parts}] The user asked: {user_text}"
+                            )
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # News intent
+                elif any(phrase in lower_text for phrase in _NEWS_PHRASES):
+                    if not currents_api_key:
+                        augmented = f"[System: News unavailable — CURRENTS_API_KEY not configured.] The user asked: {user_text}"
+                    else:
+                        topic = _extract_news_topic(user_text)
+                        articles = get_news(currents_api_key, topic=topic)
+                        if articles and "error" in articles[0]:
+                            augmented = f"[System: News lookup failed — {articles[0]['error']}] The user asked: {user_text}"
+                        else:
+                            items = "; ".join(f"'{a['title']}' ({a['source']})" for a in articles)
+                            topic_note = f" about {topic}" if topic else ""
+                            augmented = f"[System: Latest news{topic_note} — {items}] The user asked: {user_text}"
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # Calendar intent
+                elif any(phrase in lower_text for phrase in _CALENDAR_PHRASES):
+                    events = get_calendar_events()
+                    if not events:
+                        augmented = f"[System: No upcoming calendar events found.] The user asked: {user_text}"
+                    elif "error" in events[0]:
+                        augmented = f"[System: Calendar lookup failed — {events[0]['error']}] The user asked: {user_text}"
+                    else:
+                        items = "; ".join(
+                            f"'{e['summary']}' at {e['start']}" + (f" in {e['location']}" if e['location'] else "")
+                            for e in events
+                        )
+                        augmented = f"[System: Upcoming calendar events — {items}] The user asked: {user_text}"
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # Spotify intent
+                elif any(phrase in lower_text for phrase in _SPOTIFY_PHRASES):
+                    if not sp:
+                        augmented = f"[System: Spotify unavailable — not configured.] The user asked: {user_text}"
+                    else:
+                        cmd = _parse_spotify_command(user_text)
+                        result = spotify_control(sp, cmd["action"], cmd.get("query"))
+                        if "error" in result:
+                            augmented = f"[System: Spotify error — {result['error']}] The user asked: {user_text}"
+                        elif "success" in result:
+                            augmented = f"[System: Spotify — {result['success']}] The user asked: {user_text}"
+                        else:
+                            state = "playing" if result["is_playing"] else "paused"
+                            augmented = (
+                                f"[System: Currently {state} on Spotify — '{result['track']}' "
+                                f"by {result['artist']} from '{result['album']}'] The user asked: {user_text}"
+                            )
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # DuckDuckGo instant answer
+                elif any(phrase in lower_text for phrase in _SEARCH_PHRASES):
+                    query = _extract_search_query(user_text)
+                    result = get_duckduckgo_answer(query)
+                    if "error" in result:
+                        augmented = f"[System: No instant answer found for '{query}' — answer from your own knowledge.] The user asked: {user_text}"
+                    else:
+                        source_note = f" ({result['source']})" if result.get("source") else ""
+                        augmented = f"[System: Search result{source_note} — {result['answer']}] The user asked: {user_text}"
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # Wikipedia
+                elif any(phrase in lower_text for phrase in _WIKIPEDIA_PHRASES):
+                    topic = _extract_wikipedia_topic(user_text)
+                    result = get_wikipedia_summary(topic)
+                    if "error" in result:
+                        augmented = f"[System: Wikipedia lookup failed — {result['error']}] The user asked: {user_text}"
+                    else:
+                        summary = result["summary"][:800]
+                        augmented = f"[System: Wikipedia — '{result['title']}': {summary}] The user asked: {user_text}"
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # General Claude fallback
+                else:
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(user_text))
+                    print(f"{response}\n")
+
                 recorder.drain()  # flush mic bleed before next listen
 
     except KeyboardInterrupt:

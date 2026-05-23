@@ -1,5 +1,8 @@
-# API keys — never commit these
+# API keys and OAuth tokens — never commit these
 .env
+credentials.json
+token.json
+.cache
 
 # Python
 __pycache__/

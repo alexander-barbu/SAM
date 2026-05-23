@@ -1,5 +1,3 @@
-import os
-
 SAMPLE_RATE: int = 16000
 CHANNELS: int = 1
 FRAME_DURATION_MS: int = 30
@@ -14,7 +12,7 @@ WAKE_MODEL: str = "tiny"
 COMMAND_MODEL: str = "base"
 COMPUTE_TYPE: str = "int8"
 
-CLAUDE_MODEL: str = "claude-haiku-4-5-20251001" # changed model from sonnet to haiku for lower response time, may change in future 
+CLAUDE_MODEL: str = "claude-haiku-4-5-20251001" # changed model from sonnet to haiku for lower response time, may change in future
 MAX_HISTORY_TURNS: int = 20
 
 TTS_VOICE: str = "en-US-AvaNeural"
@@ -30,5 +28,7 @@ SYSTEM_PROMPT: str = (
     "Keep your responses concise and conversational — you are speaking aloud, not writing. "
     "Avoid bullet points, markdown formatting, long lists, and emojis. "
     "Never use emojis under any circumstances. "
-    "Speak naturally as if having a conversation."
+    "Speak naturally as if having a conversation. "
+    "When you receive a [System: ...] prefix in a message, it contains live data fetched for you. "
+    "Use it to answer the user's question naturally without mentioning the system prefix."
 )
