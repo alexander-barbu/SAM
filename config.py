@@ -14,13 +14,13 @@ WAKE_MODEL: str = "tiny"
 COMMAND_MODEL: str = "base"
 COMPUTE_TYPE: str = "int8"
 
-CLAUDE_MODEL: str = "claude-sonnet-4-6"
+CLAUDE_MODEL: str = "claude-haiku-4-5-20251001"
 MAX_HISTORY_TURNS: int = 20
 
 TTS_VOICE: str = "en-US-AvaNeural"
 TTS_RATE: str = "+20%"
 
-CONVERSATION_TIMEOUT_S: float = 10.0  # seconds of silence before returning to wake-word mode
+CONVERSATION_TIMEOUT_S: float = 6.0   # seconds of silence before returning to wake-word mode
 
 INPUT_DEVICE: int | None = None
 OUTPUT_DEVICE: int | None = None
