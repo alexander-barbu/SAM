@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -34,16 +35,21 @@ _CALENDAR_PHRASES = {
     "am i free", "what's on my schedule", "any events", "upcoming events",
     "what's today", "what's tomorrow",
 }
-_SPOTIFY_PHRASES = {
-    "what's playing", "current song", "now playing", "what song is",
-    "who sings this", "what music",
-    "pause music", "pause the music", "stop the music", "next song", "skip song",
-    "skip this", "previous song", "volume up", "turn it up", "louder",
-    "volume down", "turn it down", "quieter", "resume music", "resume the music",
-    "play some", "play a song", "shuffle music", "shuffle songs",
-    "add to playlist", "add to my playlist", "save to playlist",
-    "save this song", "add this song", "add this to my",
+_SPOTIFY_KEYWORDS = {
+    "pause", "unpause", "resume music", "skip", "next song", "previous song",
+    "volume up", "volume down", "louder", "quieter", "shuffle",
+    "what's playing", "now playing", "current song", "who sings",
+    "like this song", "like the song", "unlike", "recently played",
+    "repeat", "stop music", "stop the music",
+    "add to playlist", "save to playlist", "save this song",
 }
+
+
+def _is_spotify_intent(text: str) -> bool:
+    lower = text.lower()
+    if any(kw in lower for kw in _SPOTIFY_KEYWORDS):
+        return True
+    return bool(re.match(r"^(play|put on)\s+\S", lower))
 _SEARCH_PHRASES = {
     "search for", "look up", "look it up", "quick answer", "find information",
     "google that", "search that",
@@ -73,41 +79,73 @@ def _extract_search_query(user_text: str) -> str:
 
 
 def _extract_wikipedia_topic(user_text: str) -> str:
-    lower = user_text.lower()
-    for marker in ("wikipedia ", "wiki ", "on wikipedia", "on wiki"):
-        idx = lower.find(marker)
-        if idx != -1:
-            return user_text[idx + len(marker):].strip().strip("?")
-    return user_text.strip("?").strip()
+    text = user_text.strip().rstrip("?")
+    # Remove "on wikipedia/wiki" suffix or inline occurrence
+    text = re.sub(r"\bon\s+wiki(?:pedia)?\b", "", text, flags=re.IGNORECASE)
+    # Remove "wikipedia/wiki" prefix patterns like "wikipedia for", "wiki article on"
+    text = re.sub(r"\bwiki(?:pedia)?\b(?:\s+(?:article\s+(?:on|about)|for))?\s*", "", text, flags=re.IGNORECASE)
+    # Strip common leading search verbs
+    for prefix in ("search for", "look up", "tell me about", "find information about",
+                   "what is", "what are", "who is", "who was"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.strip(" ,")
 
 
 def _parse_spotify_command(user_text: str) -> dict:
     lower = user_text.lower()
+
     if any(p in lower for p in ("pause", "stop the music", "stop music")):
         return {"action": "pause"}
     if any(p in lower for p in ("next", "skip")):
         return {"action": "next"}
-    if any(p in lower for p in ("previous song", "go back", "last song")):
+    if any(p in lower for p in ("previous", "go back", "last song")):
         return {"action": "previous"}
     if any(p in lower for p in ("louder", "volume up", "turn it up", "turn up")):
         return {"action": "volume_up"}
     if any(p in lower for p in ("quieter", "volume down", "turn it down", "turn down")):
         return {"action": "volume_down"}
+
+    m = re.search(r"(?:set volume|set it) to (\d+)", lower)
+    if m:
+        return {"action": "set_volume", "query": m.group(1)}
+
+    if "shuffle off" in lower or "disable shuffle" in lower:
+        return {"action": "shuffle_off"}
     if "shuffle" in lower:
-        return {"action": "shuffle"}
-    if any(p in lower for p in ("what's playing", "current song", "now playing", "who sings", "what song", "what music")):
+        return {"action": "shuffle_on"}
+
+    if "repeat off" in lower or "stop repeating" in lower:
+        return {"action": "repeat_off"}
+    if any(p in lower for p in ("repeat this", "repeat track", "loop this")):
+        return {"action": "repeat_track"}
+    if "repeat" in lower:
+        return {"action": "repeat_context"}
+
+    if any(p in lower for p in ("like this", "like the song", "save this song", "heart this")):
+        return {"action": "like_song"}
+    if any(p in lower for p in ("unlike", "unsave", "remove from liked")):
+        return {"action": "unlike_song"}
+
+    if "recently played" in lower or "what have i been listening" in lower:
+        return {"action": "recently_played"}
+
+    if any(p in lower for p in ("what's playing", "current song", "now playing",
+                                 "who sings", "what song", "what music")):
         return {"action": "current"}
-    if any(p in lower for p in ("add to playlist", "add to my playlist", "save to playlist",
-                                 "save this song", "add this song", "add this to my")):
+
+    if any(p in lower for p in ("add to playlist", "save to playlist", "add this to my")):
         return {"action": "add_to_playlist"}
-    # Normalise punctuation so "Play, Eyesight" matches the same as "Play Eyesight"
+
     normalised = lower.replace(",", " ").replace("  ", " ")
-    for marker in ("play some ", "play a song called ", "play ", "put on some ", "put on "):
+    for marker in ("play a song called ", "put on some ", "put on ", "play some ", "play "):
         idx = normalised.find(marker)
         if idx != -1:
             query = user_text[idx + len(marker):].strip().lstrip(", ")
             if query:
                 return {"action": "play", "query": query}
+
     return {"action": "resume"}
 
 
@@ -260,7 +298,7 @@ def main() -> None:
                     print(f"{response}\n")
 
                 # Spotify intent
-                elif any(phrase in lower_text for phrase in _SPOTIFY_PHRASES):
+                elif _is_spotify_intent(lower_text):
                     if not sp:
                         augmented = f"[System: Spotify unavailable — not configured.] The user asked: {user_text}"
                     else:
@@ -280,20 +318,7 @@ def main() -> None:
                     response = speaker.speak_streaming(conversation.stream_tokens(augmented))
                     print(f"{response}\n")
 
-                # DuckDuckGo instant answer
-                elif any(phrase in lower_text for phrase in _SEARCH_PHRASES):
-                    query = _extract_search_query(user_text)
-                    result = get_duckduckgo_answer(query)
-                    if "error" in result:
-                        augmented = f"[System: No instant answer found for '{query}' — answer from your own knowledge.] The user asked: {user_text}"
-                    else:
-                        source_note = f" ({result['source']})" if result.get("source") else ""
-                        augmented = f"[System: Search result{source_note} — {result['answer']}] The user asked: {user_text}"
-                    print("[Sam] ", end="", flush=True)
-                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
-                    print(f"{response}\n")
-
-                # Wikipedia
+                # Wikipedia (checked before general search to catch "look up X on wikipedia")
                 elif any(phrase in lower_text for phrase in _WIKIPEDIA_PHRASES):
                     topic = _extract_wikipedia_topic(user_text)
                     result = get_wikipedia_summary(topic)
@@ -302,6 +327,19 @@ def main() -> None:
                     else:
                         summary = result["summary"][:800]
                         augmented = f"[System: Wikipedia — '{result['title']}': {summary}] The user asked: {user_text}"
+                    print("[Sam] ", end="", flush=True)
+                    response = speaker.speak_streaming(conversation.stream_tokens(augmented))
+                    print(f"{response}\n")
+
+                # DuckDuckGo web search
+                elif any(phrase in lower_text for phrase in _SEARCH_PHRASES):
+                    query = _extract_search_query(user_text)
+                    result = get_duckduckgo_answer(query)
+                    if "error" in result:
+                        augmented = f"[System: No search results found for '{query}' — answer from your own knowledge.] The user asked: {user_text}"
+                    else:
+                        source_note = f" ({result['source']})" if result.get("source") else ""
+                        augmented = f"[System: Web search results{source_note} — {result['answer']}] The user asked: {user_text}"
                     print("[Sam] ", end="", flush=True)
                     response = speaker.speak_streaming(conversation.stream_tokens(augmented))
                     print(f"{response}\n")

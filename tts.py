@@ -17,6 +17,38 @@ _loop = _asyncio.new_event_loop()
 threading.Thread(target=_loop.run_forever, daemon=True, name="tts-loop").start()
 
 
+def _preprocess_for_tts(text: str) -> str:
+    """Expand abbreviations that TTS engines commonly mispronounce."""
+    # Titles / honorifics — before a word (usually a name)
+    text = re.sub(r'\bMr\.(?=\s)', 'Mister', text)
+    text = re.sub(r'\bMrs\.(?=\s)', 'Missus', text)
+    text = re.sub(r'\bMs\.(?=\s)', 'Miss', text)
+    text = re.sub(r'\bDr\.(?=\s[A-Z])', 'Doctor', text)
+    text = re.sub(r'\bProf\.(?=\s)', 'Professor', text)
+    text = re.sub(r'\bJr\.', 'Junior', text)
+    text = re.sub(r'\bSr\.(?=\s|$)', 'Senior', text)
+
+    # St. — Saint before a capitalised name, Street otherwise
+    text = re.sub(r'\bSt\.(?=\s+[A-Z])', 'Saint', text)
+    text = re.sub(r'\bSt\.', 'Street', text)
+
+    # Road / address suffixes
+    text = re.sub(r'\bAve\.', 'Avenue', text)
+    text = re.sub(r'\bBlvd\.', 'Boulevard', text)
+    text = re.sub(r'\bRd\.', 'Road', text)
+    text = re.sub(r'\bLn\.', 'Lane', text)
+    text = re.sub(r'\bDr\.(?=\s|,|$)', 'Drive', text)   # remaining Dr. = Drive
+
+    # Latin / common shorthand
+    text = re.sub(r'\betc\.', 'etcetera', text, flags=re.IGNORECASE)
+    text = re.sub(r'\be\.g\.,?', 'for example,', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bi\.e\.,?', 'that is,', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bvs\.', 'versus', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bNo\.(?=\s*\d)', 'Number', text, flags=re.IGNORECASE)
+
+    return text
+
+
 def _run_async(coro):
     """Submit a coroutine to the persistent loop and block until it completes."""
     return _asyncio.run_coroutine_threadsafe(coro, _loop).result()
@@ -117,6 +149,7 @@ class Speaker:
         return full_response
 
     async def _synthesise(self, text: str) -> bytes:
+        text = _preprocess_for_tts(text)
         communicate = edge_tts.Communicate(text, voice=self.voice, rate=self.rate)
         chunks: list[bytes] = []
         async for chunk in communicate.stream():

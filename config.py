@@ -3,16 +3,17 @@ CHANNELS: int = 1
 FRAME_DURATION_MS: int = 30
 FRAME_SAMPLES: int = SAMPLE_RATE * FRAME_DURATION_MS // 1000  # 480
 
-VAD_AGGRESSIVENESS: int = 2
+VAD_AGGRESSIVENESS: int = 2       # 0-3; 1 is less aggressive so quiet speech at word edges isn't dropped
 SILENCE_GAP_MS: int = 400        # flush wake-word segment after this much silence
-COMMAND_SILENCE_MS: int = 750   # end command recording after this much silence
+COMMAND_SILENCE_MS: int = 500   # end command recording after this much silence (was 750 — too short for natural pauses)
 COMMAND_MAX_DURATION_S: int = 15
+PRE_SPEECH_BUFFER_FRAMES: int = 5  # ~150ms ring buffer prepended so word onsets aren't clipped
 
 WAKE_MODEL: str = "tiny"
-COMMAND_MODEL: str = "base"
+COMMAND_MODEL: str = "base.en"  # English-only base: same size as base, faster + slightly better accuracy than multilingual base
 COMPUTE_TYPE: str = "int8"
 
-CLAUDE_MODEL: str = "claude-haiku-4-5-20251001" # changed model from sonnet to haiku for lower response time, may change in future
+CLAUDE_MODEL: str = "claude-haiku-4-5-20251001"
 MAX_HISTORY_TURNS: int = 20
 
 TTS_VOICE: str = "en-US-AvaNeural"

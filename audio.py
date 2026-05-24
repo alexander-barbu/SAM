@@ -8,7 +8,7 @@ import webrtcvad
 from config import (
     SAMPLE_RATE, CHANNELS, FRAME_DURATION_MS, FRAME_SAMPLES,
     VAD_AGGRESSIVENESS, COMMAND_SILENCE_MS, COMMAND_MAX_DURATION_S,
-    OUTPUT_DEVICE,
+    PRE_SPEECH_BUFFER_FRAMES, OUTPUT_DEVICE,
 )
 
 
@@ -77,7 +77,9 @@ class AudioRecorder:
 
         voiced_started = False
         consecutive_silence = 0
-        pre_speech_frames = 0
+        pre_speech_count = 0
+        # Ring buffer so word onsets aren't clipped when VAD fires slightly late
+        pre_speech_ring: list[bytes] = []
         frames: list[bytes] = []
         total_frames = 0
 
@@ -87,6 +89,10 @@ class AudioRecorder:
             speech = self.is_speech(frame)
 
             if speech:
+                if not voiced_started:
+                    # Prepend the recent pre-speech frames so the onset isn't lost
+                    frames.extend(pre_speech_ring)
+                    pre_speech_ring.clear()
                 voiced_started = True
                 consecutive_silence = 0
                 frames.append(frame)
@@ -96,9 +102,12 @@ class AudioRecorder:
                 if consecutive_silence >= silence_frames_needed:
                     break
             else:
-                # pre-speech silence: count towards timeout, then discard
-                pre_speech_frames += 1
-                if timeout_frames and pre_speech_frames >= timeout_frames:
+                # Keep a short rolling window before speech starts
+                pre_speech_ring.append(frame)
+                if len(pre_speech_ring) > PRE_SPEECH_BUFFER_FRAMES:
+                    pre_speech_ring.pop(0)
+                pre_speech_count += 1
+                if timeout_frames and pre_speech_count >= timeout_frames:
                     return pcm_frames_to_float32([])  # timed out waiting for speech
 
         return pcm_frames_to_float32(frames)
