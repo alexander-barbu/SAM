@@ -126,7 +126,7 @@ def get_weather(lat: float, lon: float) -> dict:
 
 def get_news(api_key: str, topic: str | None = None, max_articles: int = 5) -> list[dict]:
     """
-    Fetch latest headlines from Currents API (free tier, API key required).
+    Fetch latest news from Currents API (free tier, API key required).
     Returns list of {"title", "description", "source", "published"} or [{"error": str}].
     """
     params: dict = {"apiKey": api_key, "language": "en"}
@@ -409,13 +409,21 @@ def spotify_control(sp, action: str, query: str | None = None) -> dict:
         if device_id is None:
             return {"error": "No Spotify device found — open the Spotify app on any device first"}
 
-        if action == "pause":
-            sp.pause_playback(device_id=device_id)
-            return {"success": "Playback paused"}
+        if action in ("pause", "resume"):
+            pb = sp.current_playback()
+            is_playing = (pb or {}).get("is_playing", False)
 
-        if action == "resume":
-            sp.start_playback(device_id=device_id)
-            return {"success": "Playback resumed"}
+            if action == "pause":
+                if not is_playing:
+                    return {"success": "Already paused"}
+                sp.pause_playback(device_id=device_id)
+                return {"success": "Playback paused"}
+
+            if action == "resume":
+                if is_playing:
+                    return {"success": "Already playing"}
+                sp.start_playback(device_id=device_id)
+                return {"success": "Playback resumed"}
 
         if action == "next":
             sp.next_track(device_id=device_id)
@@ -473,6 +481,22 @@ def spotify_control(sp, action: str, query: str | None = None) -> dict:
             sp.repeat("off", device_id=device_id)
             return {"success": "Repeat disabled"}
 
+        if action == "play_playlist":
+            playlists = sp.current_user_playlists(limit=50)
+            items = [p for p in playlists.get("items", []) if p]
+            if not items:
+                return {"error": "No playlists found on your account"}
+            if query:
+                q_lower = query.lower()
+                for pl in items:
+                    if q_lower in pl["name"].lower():
+                        sp.start_playback(device_id=device_id, context_uri=pl["uri"])
+                        return {"success": f"Playing playlist '{pl['name']}'"}
+                return {"error": f"No playlist found matching '{query}'"}
+            pl = items[0]
+            sp.start_playback(device_id=device_id, context_uri=pl["uri"])
+            return {"success": f"Playing playlist '{pl['name']}'"}
+
         if action == "play" and query:
             q_lower = query.lower()
 
@@ -483,19 +507,36 @@ def spotify_control(sp, action: str, query: str | None = None) -> dict:
                 res = sp.search(q=formatted, type="track", limit=1)
                 tracks = res.get("tracks", {}).get("items", [])
                 if not tracks:
-                    res = sp.search(q=query, type="track", limit=1)
-                    tracks = res.get("tracks", {}).get("items", [])
+                    # Fallback: broader search but only keep tracks whose artist name
+                    # overlaps with what was asked — prevents totally wrong results
+                    res = sp.search(q=query, type="track", limit=5)
+                    queried_artist = parts[1].strip().lower()
+                    tracks = [
+                        t for t in res.get("tracks", {}).get("items", [])
+                        if any(
+                            queried_artist in a["name"].lower() or a["name"].lower() in queried_artist
+                            for a in t.get("artists", [])
+                        )
+                    ]
                 if tracks:
                     t = tracks[0]
                     artist = (t.get("artists") or [{}])[0].get("name", "Unknown")
                     sp.start_playback(device_id=device_id, uris=[t["uri"]])
                     return {"success": f"Playing '{t['name']}' by {artist}"}
-                return {"error": f"Nothing found for '{query}'"}
+                return {"error": f"Couldn't find '{parts[0].strip()}' by {parts[1].strip()} on Spotify"}
 
             # Liked Songs
-            if q_lower in ("liked songs", "liked", "my liked songs", "saved songs"):
-                sp.start_playback(device_id=device_id, context_uri="spotify:collection:tracks")
-                return {"success": "Playing your Liked Songs"}
+            if q_lower in ("liked songs", "liked", "my liked songs", "saved songs", "saved"):
+                try:
+                    sp.start_playback(device_id=device_id, context_uri="spotify:collection:tracks")
+                    return {"success": "Playing your Liked Songs"}
+                except Exception:
+                    saved = sp.current_user_saved_tracks(limit=50)
+                    uris = [i["track"]["uri"] for i in saved.get("items", []) if i.get("track")]
+                    if not uris:
+                        return {"error": "No liked songs found in your library"}
+                    sp.start_playback(device_id=device_id, uris=uris)
+                    return {"success": "Playing your Liked Songs"}
 
             # Playlist search
             if "playlist" in q_lower or q_lower.startswith("my "):

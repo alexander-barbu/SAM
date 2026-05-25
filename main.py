@@ -10,16 +10,17 @@ from apis import (get_location, get_weather, get_news,
                   get_calendar_events, get_spotify_client, spotify_control)
 from config import INPUT_DEVICE, CONVERSATION_TIMEOUT_S
 from llm import ConversationManager
+from memory import MemoryManager
 from transcriber import Transcriber
 from tts import Speaker
 from wakeword import WakeWordDetector
 
-_RESET_PHRASES = {"forget everything", "reset conversation", "start over", "clear history"}
-_EXIT_PHRASES  = {"goodbye", "bye", "see you", "that's all", "stop", "go to sleep"}
+_EXIT_PHRASES  = {"end task"}
 _SLEEP_PHRASES = {
-    "thanks a lot", "thank you so much", "thanks for that", "thanks for your help",
-    "sleep", "that's all i need", "that's perfect", "that's great", "brilliant thanks",
-    "perfect thanks", "great thanks", "thank you", "nope, that's it"
+    "goodbye", "bye", "see you", "see ya", "later",
+    "sleep", "that's all", "that's all i need", "nope that's it", "nope, that's it",
+    "thanks a lot", "thank you so much", "thanks for your help",
+    "brilliant thanks", "perfect thanks", "great thanks",
 }
 _WEATHER_PHRASES = {
     "weather", "temperature", "raining", "rain", "sunny", "cloudy",
@@ -36,13 +37,25 @@ _CALENDAR_PHRASES = {
     "what's today", "what's tomorrow",
 }
 _SPOTIFY_KEYWORDS = {
-    "pause", "unpause", "resume music", "skip", "next song", "previous song",
-    "volume up", "volume down", "louder", "quieter", "shuffle",
+    "pause", "unpause", "resume music", "resume", "skip", "next song", "previous song",
+    "volume up", "volume down", "louder", "quieter", "shuffle", "set volume",
     "what's playing", "now playing", "current song", "who sings",
     "like this song", "like the song", "unlike", "recently played",
     "repeat", "stop music", "stop the music",
     "add to playlist", "save to playlist", "save this song",
+    "add this to",
+    "play my playlist", "play playlist", "put on my playlist",
 }
+
+
+def _apply_artist_aliases(text: str, memory) -> str:
+    """Substitute any memorised artist-name corrections into the user's text."""
+    result = text
+    for key, correct in memory.facts.items():
+        if key.startswith("artist_alias_"):
+            wrong = key[len("artist_alias_"):].replace("_", " ")
+            result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
+    return result
 
 
 def _is_spotify_intent(text: str) -> bool:
@@ -96,6 +109,8 @@ def _extract_wikipedia_topic(user_text: str) -> str:
 def _parse_spotify_command(user_text: str) -> dict:
     lower = user_text.lower()
 
+    if any(p in lower for p in ("unpause", "resume")):
+        return {"action": "resume"}
     if any(p in lower for p in ("pause", "stop the music", "stop music")):
         return {"action": "pause"}
     if any(p in lower for p in ("next", "skip")):
@@ -111,12 +126,18 @@ def _parse_spotify_command(user_text: str) -> dict:
     if m:
         return {"action": "set_volume", "query": m.group(1)}
 
-    if "shuffle off" in lower or "disable shuffle" in lower:
+    if any(p in lower for p in (
+        "shuffle off", "disable shuffle", "turn off shuffle",
+        "turn shuffle off", "stop shuffle", "no shuffle",
+    )):
         return {"action": "shuffle_off"}
     if "shuffle" in lower:
         return {"action": "shuffle_on"}
 
-    if "repeat off" in lower or "stop repeating" in lower:
+    if any(p in lower for p in (
+        "repeat off", "stop repeating", "turn off repeat",
+        "turn repeat off", "no repeat", "disable repeat",
+    )):
         return {"action": "repeat_off"}
     if any(p in lower for p in ("repeat this", "repeat track", "loop this")):
         return {"action": "repeat_track"}
@@ -135,8 +156,26 @@ def _parse_spotify_command(user_text: str) -> dict:
                                  "who sings", "what song", "what music")):
         return {"action": "current"}
 
-    if any(p in lower for p in ("add to playlist", "save to playlist", "add this to my")):
-        return {"action": "add_to_playlist"}
+    if any(p in lower for p in ("add to playlist", "save to playlist", "add this to my", "add this song to")):
+        m = re.search(
+            r'(?:add(?:\s+this)?|save)(?:\s+(?:this\s+)?(?:song\s+)?)?'
+            r'to\s+(?:my\s+)?(.+?)(?:\s+playlist)?$',
+            lower,
+        )
+        playlist_name = m.group(1).strip() if m else None
+        return {"action": "add_to_playlist", "query": f">>{playlist_name}" if playlist_name else None}
+
+    # Intercept liked/saved songs BEFORE the playlist regex — it's a Spotify
+    # collection, not a regular playlist, so play_playlist would fail to find it.
+    # Also handles STT mishearing "liked" → "like" via liked?
+    if re.search(r'\b(?:liked?|saved)\s+songs?\b', lower):
+        return {"action": "play", "query": "liked songs"}
+
+    m = re.search(r"(?:play|put on)(?: my)?\s+(.+?)\s+playlist", lower)
+    if m:
+        return {"action": "play_playlist", "query": m.group(1).strip()}
+    if "playlist" in lower and any(p in lower for p in ("play", "put on")):
+        return {"action": "play_playlist", "query": None}
 
     normalised = lower.replace(",", " ").replace("  ", " ")
     for marker in ("play a song called ", "put on some ", "put on ", "play some ", "play "):
@@ -184,7 +223,8 @@ def main() -> None:
     recorder = AudioRecorder(device=INPUT_DEVICE)
     detector = WakeWordDetector(recorder)
     transcriber = Transcriber()
-    conversation = ConversationManager(api_key=api_key)
+    memory = MemoryManager()
+    conversation = ConversationManager(api_key=api_key, memory=memory)
     speaker = Speaker()
 
     recorder.open()
@@ -216,22 +256,21 @@ def main() -> None:
                     continue
                 print(f"[You] {user_text}")
 
+                _lower = user_text.lower()
+                _words = len(user_text.split())
+
                 # Exit conversation — explicit farewell
-                if any(phrase in user_text.lower() for phrase in _EXIT_PHRASES):
+                if _words <= 6 and any(phrase in _lower for phrase in _EXIT_PHRASES):
                     speaker.speak("Goodbye!")
-                    break
-
-                # Sleep — gratitude / natural conversation ender
-                if any(phrase in user_text.lower() for phrase in _SLEEP_PHRASES):
-                    speaker.speak("Happy to help! Goodbye.")
-                    break
-
-                # Reset history
-                if any(phrase in user_text.lower() for phrase in _RESET_PHRASES):
-                    conversation.reset()
-                    speaker.speak("Done, memory cleared. What else?")
                     recorder.drain()
-                    continue
+                    break
+
+                # Sleep — natural conversation ender (word-count guard avoids
+                # mid-sentence phrases like "that's great, now play music" triggering this)
+                if _words <= 8 and any(phrase in _lower for phrase in _SLEEP_PHRASES):
+                    speaker.speak("Happy to help! Goodbye.")
+                    recorder.drain()
+                    break
 
                 lower_text = user_text.lower()
 
@@ -245,11 +284,20 @@ def main() -> None:
                             augmented = f"[System: Weather lookup failed — {weather['error']}] The user asked: {user_text}"
                         else:
                             c = weather["current"]
-                            forecast_parts = "; ".join(
-                                f"{d['date']}: high={d['high_f']}°F, low={d['low_f']}°F, "
-                                f"precip={d['precipitation_in']}in, UV max={d['uv_index_max']}, "
-                                f"wind max={d['wind_speed_max_mph']}mph, code={d['weather_code']}"
-                                for d in weather["forecast"]
+                            fc = weather["forecast"]
+
+                            def _fmt_day(d: dict) -> str:
+                                return (
+                                    f"high={d['high_f']}°F low={d['low_f']}°F "
+                                    f"precip={d['precipitation_in']}in "
+                                    f"UV={d['uv_index_max']} wind={d['wind_speed_max_mph']}mph "
+                                    f"code={d['weather_code']}"
+                                )
+
+                            today_str    = _fmt_day(fc[0]) if fc else "N/A"
+                            tomorrow_str = _fmt_day(fc[1]) if len(fc) > 1 else "N/A"
+                            extended_str = "; ".join(
+                                f"{d['date']}: {_fmt_day(d)}" for d in fc[2:]
                             )
                             augmented = (
                                 f"[System: Current weather in {location['city']} — "
@@ -257,7 +305,10 @@ def main() -> None:
                                 f"humidity={c['humidity_pct']}%, precipitation={c['precipitation_in']}in, "
                                 f"wind={c['wind_speed_mph']}mph, UV index={c['uv_index']}, "
                                 f"WMO code={c['weather_code']}, is_day={c['is_day']}. "
-                                f"4-day forecast: {forecast_parts}] The user asked: {user_text}"
+                                f"Today's forecast: {today_str}. "
+                                f"Tomorrow: {tomorrow_str}. "
+                                f"Extended (only mention if user explicitly asks for more days): {extended_str}"
+                                f"] The user asked: {user_text}"
                             )
                     print("[Sam] ", end="", flush=True)
                     response = speaker.speak_streaming(conversation.stream_tokens(augmented))
@@ -302,7 +353,7 @@ def main() -> None:
                     if not sp:
                         augmented = f"[System: Spotify unavailable — not configured.] The user asked: {user_text}"
                     else:
-                        cmd = _parse_spotify_command(user_text)
+                        cmd = _parse_spotify_command(_apply_artist_aliases(user_text, memory))
                         result = spotify_control(sp, cmd["action"], cmd.get("query"))
                         if "error" in result:
                             augmented = f"[System: Spotify error — {result['error']}] The user asked: {user_text}"

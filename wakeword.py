@@ -10,10 +10,10 @@ from config import WAKE_MODEL, COMPUTE_TYPE, SILENCE_GAP_MS, FRAME_DURATION_MS
 _WAKE_WORD_RE = re.compile(r'\bsam\b')
 
 # Segments where Whisper has low confidence there's real speech are discarded
-_NO_SPEECH_THRESHOLD = 0.8
+_NO_SPEECH_THRESHOLD = 0.7
 
-# Voiced frames required before a segment is worth transcribing (~60 ms)
-_MIN_VOICED_FRAMES = 2
+# Voiced frames required before a segment is worth transcribing (~30 ms)
+_MIN_VOICED_FRAMES = 1
 
 
 class WakeWordDetector:
@@ -79,9 +79,9 @@ class WakeWordDetector:
         segments, _ = self.model.transcribe(
             audio,
             language="en",
-            beam_size=5,      # higher beam for better single-word accuracy
-            vad_filter=False, # VAD already applied upstream
-            # no hotwords — biasing toward "Sam" causes hallucinations on noise
+            beam_size=5,         # higher beam for better single-word accuracy
+            vad_filter=False,    # VAD already applied upstream
+            initial_prompt="Sam",  # soft hint — helps with "Hey Sam", "Yo Sam", etc.
         )
         parts = []
         for seg in segments:

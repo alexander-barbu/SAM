@@ -8,7 +8,7 @@ import webrtcvad
 from config import (
     SAMPLE_RATE, CHANNELS, FRAME_DURATION_MS, FRAME_SAMPLES,
     VAD_AGGRESSIVENESS, COMMAND_SILENCE_MS, COMMAND_MAX_DURATION_S,
-    PRE_SPEECH_BUFFER_FRAMES, OUTPUT_DEVICE,
+    PRE_SPEECH_BUFFER_FRAMES, OUTPUT_DEVICE, MIN_SPEECH_RMS,
 )
 
 
@@ -54,6 +54,10 @@ class AudioRecorder:
                 break
 
     def is_speech(self, frame: bytes) -> bool:
+        pcm = np.frombuffer(frame, dtype=np.int16)
+        rms = np.sqrt(np.mean(pcm.astype(np.float32) ** 2))
+        if rms < MIN_SPEECH_RMS:
+            return False
         return self.vad.is_speech(frame, SAMPLE_RATE)
 
     def record_until_silence(

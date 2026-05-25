@@ -150,9 +150,13 @@ class Speaker:
 
     async def _synthesise(self, text: str) -> bytes:
         text = _preprocess_for_tts(text)
-        communicate = edge_tts.Communicate(text, voice=self.voice, rate=self.rate)
-        chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
-        return b"".join(chunks)
+        try:
+            communicate = edge_tts.Communicate(text, voice=self.voice, rate=self.rate)
+            chunks: list[bytes] = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    chunks.append(chunk["data"])
+            return b"".join(chunks)
+        except Exception as exc:
+            print(f"[Sam] TTS error (skipping): {exc}")
+            return b""

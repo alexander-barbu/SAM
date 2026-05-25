@@ -27,3 +27,7 @@ env/
 .vscode/
 .idea/
 *.swp
+
+# Runtime user data
+user_memory.json
+=2.31.0
